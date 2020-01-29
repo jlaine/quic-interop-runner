@@ -63,8 +63,8 @@ class TestCase(abc.ABC):
     return self._download_dir.name + "/"
 
   # see https://www.stefanocappellini.it/generate-pseudorandom-bytes-with-python/ for benchmarks
-  def _generate_random_file(self, size: int) -> str:
-    filename = random_string(10)
+  def _generate_random_file(self, size: int, filename_len = 10) -> str:
+    filename = random_string(filename_len)
     enc = AES.new(os.urandom(32), AES.MODE_OFB, b'a' * 16)
     f = open(self.www_dir() + filename, "wb")
     f.write(enc.encrypt(b' ' * size))
@@ -467,6 +467,44 @@ class TestCaseTransferLoss(TestCase):
     return self._check_files()
 
 
+class TestCaseZeroRTT(TestCase):
+  NUM_FILES = 40
+  FILESIZE = 32 # in bytes
+  FILENAMELEN = 255
+
+  @staticmethod
+  def name():
+    return "zerortt"
+  
+  @staticmethod
+  def abbreviation():
+    return "Z"
+
+  def get_paths(self):
+    for _ in range(self.NUM_FILES):
+      self._files.append(self._generate_random_file(self.FILESIZE, self.FILENAMELEN))
+    return self._files
+  
+  def check(self) -> bool:
+    num_handshakes = self._count_handshakes()
+    if num_handshakes != 2:
+      logging.info("Expected exactly 2 handshakes. Got: %d", num_handshakes)
+      return False
+    if not self._check_files():
+      return False
+    tr = TraceAnalyzer(self._sim_log_dir.name + "/trace_node_left.pcap")
+    zeroRTTSize = self._payload_size(tr.get_0rtt())
+    oneRTTSize = self._payload_size(tr.get_1rtt(Direction.FROM_CLIENT))
+    logging.debug("0-RTT size: %d", zeroRTTSize)
+    logging.debug("1-RTT size: %d", oneRTTSize)
+    if zeroRTTSize < 0.8 * self.FILENAMELEN * self.NUM_FILES: 
+      logging.info("Client didn't send enough data in 0-RTT packets.")
+      return False
+    if oneRTTSize > 0.5 * self.FILENAMELEN * self.NUM_FILES:
+      logging.info("Client sent too much dat in 0-RTT packets.")
+      return False
+    return True
+
 class MeasurementGoodput(Measurement):
   FILESIZE = 10*MB
   _result = 0.0
@@ -545,6 +583,29 @@ class MeasurementCrossTraffic(MeasurementGoodput):
   def additional_containers() -> List[str]:
     return [ "iperf_server", "iperf_client" ]
 
+  def check(self) -> bool:
+    num_handshakes = self._count_handshakes()
+    if num_handshakes != 1:
+      logging.info("Expected exactly 1 handshake. Got: %d", num_handshakes)
+      return False
+    if not self._check_files():
+      return False
+
+    packets = TraceAnalyzer(self._sim_log_dir.name + "/trace_node_left.pcap").get_1rtt(Direction.FROM_SERVER)
+    first, last = 0, 0
+    for p in packets:
+      if (first == 0):
+        first = p.sniff_time
+      last = p.sniff_time
+
+    if (last - first == 0):
+      return False
+    time = (last - first) / timedelta(milliseconds = 1)
+    goodput = (8 * self.FILESIZE) / time
+    logging.debug("Transfering %d MB took %d ms. Goodput: %d kbps", self.FILESIZE/MB, time, goodput)
+    self._result = goodput
+    return True
+
 
 TESTCASES = [ 
   TestCaseHandshake,
@@ -552,6 +613,7 @@ TESTCASES = [
   TestCaseMultiplexing,
   TestCaseRetry,
   TestCaseResumption,
+  TestCaseZeroRTT,
   TestCaseHTTP3,
   TestCaseBlackhole,
   TestCaseHandshakeLoss,
