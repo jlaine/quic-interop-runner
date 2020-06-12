@@ -1,0 +1,64 @@
+name: interop
+
+on: [push]
+
+jobs:
+  wireshark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          repository: wireshark/wireshark
+      - name: Install dependencies
+        run: |
+          sudo tools/debian-setup.sh --install-deb-deps --install-optional
+      - name: Build packages
+        run: |
+          dpkg-buildpackage
+          mkdir packages
+          mv ../*.deb packages
+      - name: Upload packages
+        uses: actions/upload-artifact@v1
+        with:
+          name: wireshark
+          path: packages
+
+  tests:
+    needs: [wireshark]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [aioquic, mvfst, ngtcp2, picoquic, quant, quic-go, quiche, quicly]
+        client: [aioquic, mvfst, ngtcp2, picoquic, quant, quic-go, quiche, quicly]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v1
+        with:
+          python-version: 3.8
+      - name: Download Wireshark
+        uses: actions/download-artifact@v1
+        with:
+          name: wireshark
+          path: packages
+      - name: Install Wireshark
+        run: |
+          sudo dpkg -i \
+            packages/libwireshark-data_*.deb \
+            packages/libwireshark0_*.deb \
+            packages/libwiretap0_*.deb \
+            packages/libwsutil0_*.deb \
+            packages/tshark_*.deb \
+            packages/wireshark-common_*.deb || true
+          sudo apt-get -f install
+      - name: Install Python packages
+        run: |
+          pip install -U pip
+          pip install -r requirements.txt
+      - name: Run tests
+        run: python run.py --client ${{ matrix.client }} --server ${{ matrix.server }} --log-dir logs || true
+      - name: Upload logs
+        uses: actions/upload-artifact@v1
+        with:
+          name: "logs_${{ matrix.server }}_${{ matrix.client }}"
+          path: logs/
